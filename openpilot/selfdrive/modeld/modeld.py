@@ -25,6 +25,11 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.common.file_chunker import open_file_chunked, get_manifest_path
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import usbgpu_present, modeld_pkl_path, get_tg_input_devices, load_oob
+from openpilot.selfdrive.modeld.lane_centering import (
+  LaneCenteringController,
+  LaneCenteringStatus,
+  get_lane_centering_input_status,
+)
 from openpilot.selfdrive.modeld.usbgpu_link import wait_usbgpu_link
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld"
@@ -33,6 +38,13 @@ SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
+LANE_CENTERING_MODE = "absolute"  # "off", "capped", or "absolute"
+LANE_CENTERING_LOG_FORMAT = "".join((
+  "lane centering mode=%s state=%s source=%s reason=%s authority=%.3f width=%.3f center=%.3f ",
+  "policy_delta=%.3f curvature_delta=%.6f path_feasible=%.3f path_weight=%.3f ",
+  "requested_jerk=%.3f line_gate=%s edge_gate=%s entry_gate=%s policy_gate=%s ",
+  "input_calib=%d input_alive=%d input_valid=%d input_freq=%d",
+))
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -61,6 +73,37 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
   return log.ModelDataV2.Action(desiredCurvature=float(desired_curvature),
                                 desiredAcceleration=float(desired_accel),
                                 shouldStop=bool(should_stop))
+
+
+def get_lane_centered_action(model_output: dict[str, np.ndarray], lane_centering: LaneCenteringController,
+                             prev_action: log.ModelDataV2.Action, prev_base_action: log.ModelDataV2.Action,
+                             v_ego: float, current_curvature: float, lat_action_t: float, long_action_t: float,
+                             frame_dt: float, lat_active: bool, model_valid: bool, left_blinker: bool,
+                             right_blinker: bool, lane_change_active: bool
+                             ) -> tuple[dict[str, np.ndarray], log.ModelDataV2.Action,
+                                        log.ModelDataV2.Action, LaneCenteringStatus]:
+  base_action = get_action_from_model(
+    model_output, prev_base_action, lat_action_t, long_action_t, v_ego,
+  )
+  selected_model_output, lane_centering_status = lane_centering.update(
+    model_output,
+    v_ego,
+    current_curvature,
+    lat_action_t,
+    frame_dt,
+    base_action.desiredCurvature,
+    prev_action.desiredCurvature,
+    lat_active,
+    model_valid,
+    left_blinker,
+    right_blinker,
+    lane_change_active,
+  )
+
+  action = get_action_from_model(
+    selected_model_output, prev_action, lat_action_t, long_action_t, v_ego,
+  )
+  return selected_model_output, action, base_action, lane_centering_status
 
 
 class FrameMeta:
@@ -205,9 +248,13 @@ def main(demo=False):
   # TODO this needs more thought, use .2s extra for now to estimate other delays
   # TODO Move smooth seconds to action function
   long_delay = CP.longitudinalActuatorDelay + LONG_SMOOTH_SECONDS
-  prev_action = log.ModelDataV2.Action()
+  prev_model_action = log.ModelDataV2.Action()
+  prev_base_model_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  lane_centering = LaneCenteringController(LANE_CENTERING_MODE)
+  last_lane_centering_log_key = None
+  last_lane_centering_timestamp_eof = None
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -295,17 +342,63 @@ def main(demo=False):
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
 
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
-      prev_action = action
-      fill_model_msg(modelv2_send, model_output, action,
-                     publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
-                     frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen)
-
-      desire_state = modelv2_send.modelV2.meta.desireState
+      desire_state = model_output['desire_state'][0].reshape(-1)
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
       DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
+
+      if last_lane_centering_timestamp_eof is None or meta_main.timestamp_eof <= last_lane_centering_timestamp_eof:
+        lane_centering_dt = DT_MDL
+      else:
+        lane_centering_dt = (meta_main.timestamp_eof - last_lane_centering_timestamp_eof) * 1e-9
+      last_lane_centering_timestamp_eof = meta_main.timestamp_eof
+
+      lane_input_status = get_lane_centering_input_status(sm, live_calib_seen)
+      selected_model_output, action, base_action, lane_centering_status = get_lane_centered_action(
+        model_output,
+        lane_centering,
+        prev_model_action,
+        prev_base_model_action,
+        v_ego,
+        sm['carControl'].currentCurvature,
+        lat_action_t,
+        long_action_t,
+        lane_centering_dt,
+        sm['carControl'].latActive,
+        lane_input_status.ready,
+        sm['carState'].leftBlinker,
+        sm['carState'].rightBlinker,
+        DH.lane_change_state != log.LaneChangeState.off,
+      )
+      prev_model_action = action
+      prev_base_model_action = base_action
+
+      lane_centering_log_key = (
+        lane_centering_status.state, lane_centering_status.source, lane_centering_status.reason,
+        lane_centering_status.line_gate, lane_centering_status.edge_gate,
+        lane_centering_status.entry_gate, lane_centering_status.policy_gate,
+        lane_centering_status.lane_path_feasibility < 1.0,
+        lane_input_status.calibration_seen, lane_input_status.services_alive,
+        lane_input_status.services_valid, lane_input_status.services_frequency_ok,
+      )
+      if lane_centering_log_key != last_lane_centering_log_key or run_count % ModelConstants.MODEL_RUN_FREQ == 0:
+        cloudlog.info(LANE_CENTERING_LOG_FORMAT,
+                      LANE_CENTERING_MODE, lane_centering_status.state, lane_centering_status.source,
+                      lane_centering_status.reason, lane_centering_status.authority, lane_centering_status.lane_width,
+                      lane_centering_status.center_offset, lane_centering_status.policy_disagreement,
+                      lane_centering_status.curvature_correction, lane_centering_status.lane_path_feasibility,
+                      lane_centering_status.path_weight, lane_centering_status.requested_lateral_jerk,
+                      lane_centering_status.line_gate, lane_centering_status.edge_gate,
+                      lane_centering_status.entry_gate, lane_centering_status.policy_gate,
+                      lane_input_status.calibration_seen, lane_input_status.services_alive,
+                      lane_input_status.services_valid, lane_input_status.services_frequency_ok)
+        last_lane_centering_log_key = lane_centering_log_key
+
+      fill_model_msg(modelv2_send, selected_model_output, action,
+                     publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
+                     frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen)
+
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
 
