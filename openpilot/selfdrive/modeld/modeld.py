@@ -183,9 +183,6 @@ def main(demo=False):
   _present = usbgpu_present()
   _compiled = os.path.isfile(get_manifest_path(modeld_pkl_path(usbgpu=True)))
   USBGPU = _present and _compiled
-  params = Params()
-  params.put_bool("UsbGpuPresent", _present)
-  params.put_bool("UsbGpuCompiled", _compiled)
 
   config_realtime_process(7, 54)
 
