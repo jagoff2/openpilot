@@ -1,3 +1,31 @@
+##custom fork. contains lane centering modifications. 
+
+##a note about constants used:
+• The 0.04 m value was inherited from upstream openpilot. It was not calculated from your C3X, vehicle, calibration, or route
+  logs.
+
+  Exact provenance:
+
+  1. Historical openpilot lane planning used a camera-offset correction.
+  2. A January 2022 upstream commit documented that the TICI camera displacement was approximately 0.10 m, but the empirically
+     measured model-path difference averaged 0.04 m. That commit therefore used CAMERA_OFFSET = 0.04 for TICI. The sign had also
+     been corrected because the model Y-axis changed. Upstream offset-cleanup commit
+     (https://github.com/commaai/openpilot/commit/56b3c7f790209b8a306e366defc8b672808f1fe0)
+
+  3. In June 2022, openpilot made 0.04 unconditional rather than TICI-specific. Upstream generalization commit
+     (https://github.com/commaai/openpilot/commit/753045c73dff346c9c1807adcab5e0e34218fde9)
+
+  4. That value survived in openpilot’s lane-departure-warning implementation as CAMERA_OFFSET = 0.04. openpilot/openpilot/
+     selfdrive/controls/lib/ldw.py:6
+
+  5. When lane_centering.py was introduced in commit 47c9673519, the same 0.04 value and LDW envelope convention were copied into
+     it. openpilot/openpilot/selfdrive/modeld/lane_centering.py:17
+
+  Therefore, the current value is an old upstream empirical model-frame correction. It is not a verified physical measurement of
+  this C3X camera’s position relative to this vehicle’s centerline. The historical comment explicitly distinguishes the physical
+  0.10 m camera displacement from the empirically observed 0.04 m path correction.
+
+
 <div align="center" style="text-align: center;">
 
 <h1>openpilot</h1>
