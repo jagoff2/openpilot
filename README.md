@@ -1,5 +1,6 @@
 # C3X active-install snapshot
-
+## THIS BRANCH WILL LIKELY CAUSE COMMA TO BAN YOUR DEVICE FROM UPLOADS (COMMA CONNECT) IF YOU UPLOAD ANY ROUTES WHICH ARE DRIVEN ON THIS BRANCH.
+## YOU HAVE BEEN WARNED. NOT MY RESPONSIBILITY. 
 This branch captures the active, reproducible openpilot source/runtime state from:
 
 - Device: `comma@192.168.1.95`
