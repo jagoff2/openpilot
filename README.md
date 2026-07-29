@@ -1,7 +1,7 @@
 ##custom fork. contains lane centering modifications. 
 
 ##a note about constants used:
-• The 0.04 m value was inherited from upstream openpilot. It was not calculated from your C3X, vehicle, calibration, or route
+• The 0.04 m value was inherited from upstream openpilot. It was not calculated from vehicle, calibration, or route
   logs.
 
   Exact provenance:
@@ -22,7 +22,7 @@
      it. openpilot/openpilot/selfdrive/modeld/lane_centering.py:17
 
   Therefore, the current value is an old upstream empirical model-frame correction. It is not a verified physical measurement of
-  this C3X camera’s position relative to this vehicle’s centerline. The historical comment explicitly distinguishes the physical
+  this C3X camera’s position relative to the vehicle’s centerline. The historical comment explicitly distinguishes the physical
   0.10 m camera displacement from the empirically observed 0.04 m path correction.
 
 
